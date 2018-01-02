@@ -1,5 +1,5 @@
 /* xetex.js
- * simple parser for tex files
+ * simple parser for bible tex files
  * (c) 2018 David (daXXog) Volm ><> + + + <><
  * Released under Apache License, Version 2.0:
  * http://www.apache.org/licenses/LICENSE-2.0.html  
@@ -20,7 +20,43 @@
         root.XeTeX = factory();
   }
 }(this, function() {
-    var XeTeX;
-    
+	var S = require('string');
+
+    var XeTeX = function(texdata, short) {
+    	this.short = short;
+
+    	this.parse(texdata);
+    };
+
+    XeTeX.prototype.parse = function(texdata) {
+    	var line = S(texdata).lines().map(function(line) {
+    		return S(line);
+    	}), ofs = 0;
+
+    	if((line[0].count('{') === 1) && (line[0].count('}') === 1)) {
+			this.name = line[0].between('{', '}').s;
+
+			if(line[1].startsWith('{\\MT ')) {
+				this.description = line[1].chompLeft('{\\MT ').s;
+
+				if(line[2].length === 0) {
+					//meat and potatoes
+				} else {
+					this.parseError(line, 2);
+				}
+			} else {
+				this.parseError(line, 1);
+			}
+		} else {
+			this.parseError(line, 0);
+		}
+
+    	return line[0].s;
+    };
+
+    XeTeX.prototype.parseError = function(line, num) {
+    	console.error('Parse error! @ line #' + (num + 1) + ' : ' + line[num]);
+    };
+
     return XeTeX;
 }));

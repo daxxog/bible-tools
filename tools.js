@@ -20,7 +20,34 @@
         root.BibleTools = factory();
   }
 }(this, function() {
-    var BibleTools;
-    
+	var fs = require('fs'),
+		path = require('path'),
+		XeTeX = require('./xetex.js')
+
+    var BibleTools = function() {
+    	this.sourceDir = './eng-web_xetex';
+    	this.books = {};
+
+    	this.parseBook('1CH');
+    };
+
+   	BibleTools.prototype.parseBook = function(prefix) {
+   		filename = path.join(this.sourceDir, prefix + '_src.tex');
+
+   		var that = this;
+
+   		fs.readFile(filename, 'utf8', function(err, data) {
+   			if(!err) {
+   				that.books[filename] = new XeTeX(data, prefix);
+   				console.log(that.books[filename]);
+   			} else {
+   				console.error('Could not read book: ' + filename);
+   				console.error('Please try running ./get-bible.sh to download a copy of The World English Bible.');
+   			}
+   		});
+   	};
+
+   	new BibleTools();
+
     return BibleTools;
 }));
