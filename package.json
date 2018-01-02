@@ -1,0 +1,27 @@
+{
+  "name": "bible-tools",
+  "version": "1.0.0",
+  "description": "Tools for parsing The Word of God. An in-depth study.",
+  "main": "tools.js",
+  "scripts": {
+    "test": "echo \"Jesus said to him, “Again, it is written, ‘You shall not test the Lord, your God.’\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/daxxog/bible-tools.git"
+  },
+  "keywords": [
+    "bible",
+    "word",
+    "english"
+  ],
+  "author": "daXXog",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/daxxog/bible-tools/issues"
+  },
+  "homepage": "https://github.com/daxxog/bible-tools#readme",
+  "dependencies": {
+    "string": "^3.3.3"
+  }
+}
