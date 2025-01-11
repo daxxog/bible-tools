@@ -1,0 +1,99 @@
+√ bible-tools % git diff
+diff --git a/tools.js b/tools.js
+index a9d68ca..357c46c 100644
+--- a/tools.js
++++ b/tools.js
+@@ -32,7 +32,7 @@
+     };
+
+        BibleTools.prototype.parseBook = function(prefix) {
+-               filename = path.join(this.sourceDir, prefix + '_src.tex');
++               var filename = path.join(this.sourceDir, prefix + '_src.tex');
+
+                var that = this;
+
+diff --git a/xetex.js b/xetex.js
+index ddb3df9..4ee3500 100644
+--- a/xetex.js
++++ b/xetex.js
+@@ -40,7 +40,13 @@
+                                this.description = line[1].chompLeft('{\\MT ').s;
+
+                                if(line[2].length === 0) {
+-                                       //meat and potatoes
++                    if(line[3].startsWith('\\par }\\ChapOne{1}{\\PP \\VerseOne')) {
++                        line[3] = line[3].replace('\\par }\\ChapOne{1}{\\PP \\VerseOne', '\\par }\\Chap{1}{\\PP \\VerseOne');
++                        line.splice(0, 3);
++                        this.parseBody(line, 3);
++                    } else {
++                        this.parseError(line, 3);
++                    }
+                                } else {
+                                        this.parseError(line, 2);
+                                }
+@@ -54,8 +60,63 @@
+        return line[0].s;
+     };
+
+-    XeTeX.prototype.parseError = function(line, num) {
+-       console.error('Parse error! @ line #' + (num + 1) + ' : ' + line[num]);
++    XeTeX.prototype.parseBody = function(line, ofs) {
++        var chapter,
++            verse;
++
++        this.body = {};
++
++        var that = this;
++
++        line.forEach(function(v, i) {
++            if(v.startsWith('\\par }\\Chap{')) {
++                chapter = v.between('\\par }\\Chap{', '}{\\PP \\VerseOne');
++
++                if(chapter.isNumeric()) {
++                    chapter = chapter.toInt();
++                } else {
++                    that.parseError(line, i, ofs);
++                }
++
++                that.body[chapter] = {
++                    1: v.replace('\\par }\\Chap{' + chapter + '}{\\PP \\VerseOne{1}', '').s
++                };
++            } else if(v.startsWith('\\VS{')) {
++                verse = v.between('\\VS{', '}');
++
++                if(verse.isNumeric()) {
++                    verse = verse.toInt();
++                } else {
++                    that.parseError(line, i, ofs);
++                }
++
++                that.body[chapter][verse] = v.replace('\\VS{' + verse + '}', '').s;
++            } else if(v.startsWith('\\par }{\\PP \\VS{')) {
++                verse = v.between('\\par }{\\PP \\VS{', '}');
++
++                if(verse.isNumeric()) {
++                    verse = verse.toInt();
++                } else {
++                    that.parseError(line, i, ofs);
++                }
++
++                that.body[chapter][verse] = '{{tab}}' + v.replace('\\par }{\\PP \\VS{' + verse + '}', '').s;
++            } else if(v.length === 0) {
++                //console.log('zero len');
++            } else {
++                that.parseError(line, i, ofs); //throws errors on footnotes
++            }
++        });
++
++        this.body = {}; //remove after developing this function
++    };
++
++    XeTeX.prototype.parseError = function(line, num, ofs) {
++        if(!ofs) {
++            ofs = 0;
++        }
++
++       console.error('Parse error! @ line #' + (num + 1 + ofs) + ' : ' + line[num]);
+     };
+
+     return XeTeX;
