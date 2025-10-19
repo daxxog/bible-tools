@@ -26,3 +26,12 @@ opt/eng-web_usfx.zip: opt/.gitignore
 
 opt/eng-web_usfx.zip.sha512sum: opt/eng-web_usfx.zip
 	shasum -a 512 opt/eng-web_usfx.zip | tee opt/eng-web_usfx.zip.sha512sum
+
+
+opt/usfx/eng-web/signature.txt.asc:
+	make opt/eng-web_usfx.zip.sha512sum
+	mkdir -p opt/usfx/eng-web
+	cd opt/usfx/eng-web \
+		&& unzip -u -o ../../eng-web_usfx.zip \
+		&& sha256sum -c signature.txt.asc \
+	;
