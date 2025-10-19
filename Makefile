@@ -18,3 +18,11 @@ go.mod:
 
 main.go:
 	@echo "package main%%import (%#\"fmt\"%#\"io\"%#\"os\"%)%%func _main(in io.Reader, out io.Writer) error {%#fmt.Fprintln(out, \"Hello World!\")%#return nil%}%%func main() {%#err := _main(os.Stdin, os.Stdout)%#if err != nil {%##panic(err)%#}%}%" | tr '#' '\t' | tr '%' '\n' | tee main.go
+
+
+opt/eng-web_usfx.zip: opt/.gitignore
+	curl -sL https://ebible.org/Scriptures/eng-web_usfx.zip > opt/eng-web_usfx.zip
+
+
+opt/eng-web_usfx.zip.sha512sum: opt/eng-web_usfx.zip
+	shasum -a 512 opt/eng-web_usfx.zip | tee opt/eng-web_usfx.zip.sha512sum
