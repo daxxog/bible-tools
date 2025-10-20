@@ -3,18 +3,18 @@ GO_MOD_REMOTE := $$(git remote get-url origin | sed 's/git@//g;s/:/\//g;s/\.git$
 APP_NAME := $(shell printf $(GO_MOD_REMOTE) | awk '{split($$0,a,"/");print a[3]}')
 
 
-.PHONY: help # Show this Help
+.PHONY: help # Show this Help 🌈
 help:
 	@echo -e "\033[1;37mAvailable Targets\033[0m"
 	@cat Makefile | grep ".PHONY" | grep -v ".PHONY: _" | sed 's/.PHONY: //g' | sed 's/ # /\t/' | awk -F'\t' '{printf "\033[36m%-20s\033[0m%s\n", $$1, $$2}'
 
 
-.PHONY: build # Compile the Code
+.PHONY: build # Compile the Code 🦋
 build: go.mod main.go
 	go build -o bin/$(APP_NAME) .
 
 
-.PHONY: run # Run the App
+.PHONY: run # Run the App 🗝️
 run: build
 	./bin/$(APP_NAME)
 
