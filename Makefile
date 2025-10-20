@@ -1,19 +1,26 @@
 SHELL := /bin/zsh
+GO_MOD_REMOTE := $$(git remote get-url origin | sed 's/git@//g;s/:/\//g;s/\.git$$//g')
+APP_NAME := $(shell printf $(GO_MOD_REMOTE) | awk '{split($$0,a,"/");print a[3]}')
 
 
-.PHONY: help # Show this help
+.PHONY: help # Show this Help
 help:
 	@echo -e "\033[1;37mAvailable Targets\033[0m"
 	@cat Makefile | grep ".PHONY" | grep -v ".PHONY: _" | sed 's/.PHONY: //g' | sed 's/ # /\t/' | awk -F'\t' '{printf "\033[36m%-20s\033[0m%s\n", $$1, $$2}'
 
 
-.PHONY: build # Compile the code
+.PHONY: build # Compile the Code
 build: go.mod main.go
-	go build .
+	go build -o bin/$(APP_NAME) .
+
+
+.PHONY: run # Run the App
+run: build
+	./bin/$(APP_NAME)
 
 
 go.mod:
-	@go mod init $$(git remote get-url origin | sed 's/git@//g;s/:/\//g;s/\.git$$//g')/v2
+	@go mod init $(GO_MOD_REMOTE)/v2
 
 
 main.go:
