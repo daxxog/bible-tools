@@ -66,6 +66,7 @@ const (
 	stateAttrName
 	stateAttrEq
 	stateAttrValue
+	stateSelfClose
 )
 
 type ETreeBookParserState struct {
@@ -121,7 +122,6 @@ func (self *ETreeBookParser) WriteByte(c byte) error {
 	if err != nil {
 		return err
 	}
-
 	return self.parseByte(c)
 }
 
@@ -176,6 +176,11 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			} else {
 				return self.handleOpenTag(self.state.current_tag, self.state.attrs)
 			}
+		} else if c == '/' {
+			if self.state.is_closing {
+				return fmt.Errorf("unexpected / in closing tag")
+			}
+			self.state.parse_state = stateSelfClose
 		} else {
 			self.state.current_tag += string(c)
 		}
@@ -185,6 +190,8 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 		} else if c == '>' {
 			self.state.parse_state = stateText
 			return self.handleOpenTag(self.state.current_tag, self.state.attrs)
+		} else if c == '/' {
+			self.state.parse_state = stateSelfClose
 		} else {
 			self.state.current_attr_name = string(c)
 			self.state.parse_state = stateAttrName
@@ -200,7 +207,6 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			self.state.current_attr_value = ""
 			self.state.parse_state = stateAttrValue
 		} else {
-			// Assume no space after =
 			return fmt.Errorf("unexpected character after =")
 		}
 	case stateAttrValue:
@@ -209,6 +215,13 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			self.state.parse_state = stateAttrSpace
 		} else {
 			self.state.current_attr_value += string(c)
+		}
+	case stateSelfClose:
+		if c == '>' {
+			self.state.parse_state = stateText
+			return self.handleOpenTag(self.state.current_tag, self.state.attrs)
+		} else {
+			return fmt.Errorf("expected > after / in self-closing tag")
 		}
 	}
 	return nil
@@ -279,6 +292,8 @@ func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) 
 		self.state.sref = attrs["s"]
 		self.state.wopen = true
 		self.state.current_buffer.Reset()
+	case "ve":
+		self.state.vopen = false
 	}
 	return nil
 }
@@ -317,7 +332,7 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 		if book_id == "❌" {
 			return fmt.Errorf("<book id=NOT FOUND")
 		}
-		if book_id == "GEN" { // testing just with one book for now
+		// if book_id == "GEN" { // testing just with one book for now
 			o.SetBook(book_id)
 			for _, token := range book.Child {
 				token.WriteTo(o, &ws)
@@ -325,7 +340,7 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 			if err := o.Flush(); err != nil {
 				return err
 			}
-		}
+		// }
 	}
 	return nil
 }
@@ -366,9 +381,9 @@ func parseStrongs(raw string) IStrongsNumber {
 
 // bookBuilder implements IBookBuilder.
 type bookBuilder struct {
-	book           *book
-	last_chapter   uint8
-	last_verse     uint8
+	book            *book
+	last_chapter    uint8
+	last_verse      uint8
 	current_chapter *chapter
 	current_verse   *verse
 }
@@ -444,7 +459,6 @@ func (b *bookBuilder) Build() IBook {
 }
 
 // Implementations for book, chapter, verse, word (as in previous response)
-
 type book struct {
 	id       string
 	chapters []*chapter
