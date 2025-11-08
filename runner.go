@@ -46,12 +46,41 @@ type IStrongsNumber interface {
 	fmt.Stringer // raw string representation (e.g. "H6212", "G1456") [empty string "" for nil]
 }
 
+type IBookBuilder interface {
+	ID() string // three character book id (e.g. "GEN", "JHN")
+	AddWord(vref string, sref string, word_fulltext string) error // returns an error if attempting to add a word outside of the book, or if an invalid strongs reference is passed
+	Build() IBook // finalize the structure
+}
+
+type ETreeBookParserState struct {
+	book string // three character book id (e.g. "GEN", "JHN")
+	builder IBookBuilder // builder for the current book
+	vopen bool // inner verse parser (v tag open)
+	wopen bool // inner word parser (w tag open)
+	sopen bool // inner strongs parser (s reference open)
+	vref string // current verse reference (e.g. "JHN.21.4")
+	sref string // current strongs reference, reset to "" (nil IStrongsNumber) when wopen is set to false
+}
+
 type ETreeBookParser struct {
 	debug_writer io.Writer
+	state *ETreeBookParserState
 }
 
 func NewEtreeParser(debug_writer io.Writer) *ETreeBookParser {
-	return &ETreeBookParser{debug_writer: debug_writer}
+	return &ETreeBookParser{debug_writer: debug_writer, state: &ETreeBookParserState{
+		book: "",
+		vopen: false,
+		wopen: false,
+		sopen: false,
+		vref: "",
+		sref: "",
+	}}
+}
+
+func (self *ETreeBookParser) SetBook(book string) {
+	self.state.book = book
+	self.state.builder = NewBookBuilder(book)
 }
 
 func (self *ETreeBookParser) WriteSettings() etree.WriteSettings {
@@ -95,8 +124,12 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 			return fmt.Errorf("<book id=NOT FOUND")
 		}
 
-		for _, token := range book.Child {
-			token.WriteTo(o, &ws)
+		o.SetBook(book_id)
+
+		if book_id == "JHN" { // testing just with one book for now
+			for _, token := range book.Child {
+				token.WriteTo(o, &ws)
+			}
 		}
 	}
 
