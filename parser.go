@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -92,6 +93,10 @@ func (self *ETreeBookParser) WriteByte(c byte) error {
 }
 
 func (self *ETreeBookParser) parseByte(c byte) error {
+	if self.state.builder == nil {
+		return errors.New("nil book builder, must call SetBook before parsing!")
+	}
+
 	// Parse logic
 	switch self.state.parse_state {
 	case stateText:
@@ -224,17 +229,25 @@ func (self *ETreeBookParser) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (self *ETreeBookParser) Flush() error {
+func (self *ETreeBookParser) Flush() (IBook, error) {
+	if self.state.builder == nil {
+		return nil, errors.New("nil book builder (was .Flush called twice?)")
+	}
+
 	if self.state.vopen && !self.state.wopen {
 		for f := range strings.FieldsSeq(self.state.pending_text.String()) {
 			add_err := self.state.builder.AddWord(self.state.vref, "", f)
 			if add_err != nil {
-				return add_err
+				return nil, add_err
 			}
 		}
 		self.state.pending_text.Reset()
 	}
-	return nil
+
+	book := self.state.builder.Build()
+	self.state.builder = nil
+
+	return book, nil
 }
 
 func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) error {

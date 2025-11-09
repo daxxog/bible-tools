@@ -23,11 +23,15 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 		}
 		// if book_id == "GEN" { // testing just with one book for now
 		o.SetBook(book_id)
-		fmt.Fprintln(out, book_id)
 		for _, token := range book.Child {
 			token.WriteTo(o, &ws)
 		}
-		if err := o.Flush(); err != nil {
+		if book, err := o.Flush(); err == nil {
+			fmt.Fprintln(out, book.ID())
+			for word := range book.Words() {
+				fmt.Fprintln(out, word.FullText())
+			}
+		} else {
 			return err
 		}
 		// }
