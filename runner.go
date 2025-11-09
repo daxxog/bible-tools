@@ -132,8 +132,7 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 		if c == '<' {
 			// Process pending text outside w
 			if self.state.vopen && !self.state.wopen {
-				fields := strings.Fields(self.state.pending_text.String())
-				for _, f := range fields {
+				for f := range strings.FieldsSeq(self.state.pending_text.String()) {
 					add_err := self.state.builder.AddWord(self.state.vref, "", f)
 					if add_err != nil {
 						return add_err
@@ -163,36 +162,38 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			self.state.parse_state = stateTagName
 		}
 	case stateTagName:
-		if c == ' ' {
+		switch c {
+		case ' ':
 			if !self.state.is_closing {
 				self.state.parse_state = stateAttrSpace
 			} else {
 				return fmt.Errorf("unexpected space in closing tag")
 			}
-		} else if c == '>' {
+		case '>':
 			self.state.parse_state = stateText
 			if self.state.is_closing {
 				return self.handleCloseTag(self.state.current_tag)
 			} else {
 				return self.handleOpenTag(self.state.current_tag, self.state.attrs)
 			}
-		} else if c == '/' {
+		case '/':
 			if self.state.is_closing {
 				return fmt.Errorf("unexpected / in closing tag")
 			}
 			self.state.parse_state = stateSelfClose
-		} else {
+		default:
 			self.state.current_tag += string(c)
 		}
 	case stateAttrSpace:
-		if c == ' ' {
+		switch c {
+		case ' ':
 			// Skip spaces
-		} else if c == '>' {
+		case '>':
 			self.state.parse_state = stateText
 			return self.handleOpenTag(self.state.current_tag, self.state.attrs)
-		} else if c == '/' {
+		case '/':
 			self.state.parse_state = stateSelfClose
-		} else {
+		default:
 			self.state.current_attr_name = string(c)
 			self.state.parse_state = stateAttrName
 		}
@@ -259,8 +260,7 @@ func (self *ETreeBookParser) Write(b []byte) (int, error) {
 
 func (self *ETreeBookParser) Flush() error {
 	if self.state.vopen && !self.state.wopen {
-		fields := strings.Fields(self.state.pending_text.String())
-		for _, f := range fields {
+		for f := range strings.FieldsSeq(self.state.pending_text.String()) {
 			add_err := self.state.builder.AddWord(self.state.vref, "", f)
 			if add_err != nil {
 				return add_err
@@ -333,13 +333,13 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 			return fmt.Errorf("<book id=NOT FOUND")
 		}
 		// if book_id == "GEN" { // testing just with one book for now
-			o.SetBook(book_id)
-			for _, token := range book.Child {
-				token.WriteTo(o, &ws)
-			}
-			if err := o.Flush(); err != nil {
-				return err
-			}
+		o.SetBook(book_id)
+		for _, token := range book.Child {
+			token.WriteTo(o, &ws)
+		}
+		if err := o.Flush(); err != nil {
+			return err
+		}
 		// }
 	}
 	return nil
