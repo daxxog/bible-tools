@@ -1,8 +1,8 @@
 package main
 
 import (
-	"io"
 	"fmt"
+	"io"
 
 	"github.com/beevik/etree"
 )
@@ -14,7 +14,7 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 	}
 	path := etree.MustCompilePath("[name()='book']")
 	elements := el.FindElementsPathSeq(path)
-	o := NewEtreeParser(out)
+	o := NewEtreeParser()
 	ws := o.WriteSettings()
 	for book := range elements {
 		book_id := book.SelectAttrValue("id", "❌")
@@ -23,6 +23,7 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 		}
 		// if book_id == "GEN" { // testing just with one book for now
 		o.SetBook(book_id)
+		fmt.Fprintln(out, book_id)
 		for _, token := range book.Child {
 			token.WriteTo(o, &ws)
 		}
@@ -31,6 +32,7 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 		}
 		// }
 	}
+
 	return nil
 }
 

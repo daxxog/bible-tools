@@ -11,6 +11,12 @@ import (
 	"github.com/beevik/etree"
 )
 
+type devNullWriter struct { }
+func (*devNullWriter) Write(p []byte) (n int, err error) { return len(p), nil }
+func DevNullWriter() io.Writer {
+	return &devNullWriter{}
+}
+
 // parseState defines the states for the XML parser state machine.
 type parseState int
 
@@ -50,7 +56,11 @@ type ETreeBookParser struct {
 	state        *ETreeBookParserState
 }
 
-func NewEtreeParser(debug_writer io.Writer) *ETreeBookParser {
+func NewEtreeParser() *ETreeBookParser {
+	return NewEtreeParserWithDebug(DevNullWriter())
+}
+
+func NewEtreeParserWithDebug(debug_writer io.Writer) *ETreeBookParser {
 	return &ETreeBookParser{debug_writer: debug_writer, state: &ETreeBookParserState{
 		parse_state: stateText,
 	}}
