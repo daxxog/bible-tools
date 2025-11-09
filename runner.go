@@ -28,8 +28,10 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 		}
 		if book, err := o.Flush(); err == nil {
 			fmt.Fprintln(out, book.ID())
+			i := 0
 			for word := range book.Words() {
-				fmt.Fprintln(out, word.FullText())
+				i++
+				fmt.Fprintf(out, "%d['%s'][\"%s\"]\n", i, word.Verse().ID(), word.FullText())
 			}
 		} else {
 			return err
