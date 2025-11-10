@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/beevik/etree"
 )
@@ -106,6 +107,39 @@ func isAllPunct(s string) bool {
 	return true
 }
 
+func isContractionSuffix(suffix string) bool {
+	switch strings.ToLower(suffix) {
+	case "s", "t", "re", "ll", "ve", "d", "m", "em", "clock":
+		return true
+	}
+	return false
+}
+
+func mergeContractions(fields []string) []string {
+	var merged []string
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if len(merged) > 0 {
+			prevIdx := len(merged) - 1
+			prev := merged[prevIdx]
+			if strings.HasSuffix(prev, "’") && isContractionSuffix(f) {
+				merged[prevIdx] = prev + f
+				continue
+			}
+			r, size := utf8.DecodeRuneInString(f)
+			if r == '’' {
+				suffix := f[size:]
+				if isContractionSuffix(suffix) {
+					merged[prevIdx] = prev + f
+					continue
+				}
+			}
+		}
+		merged = append(merged, f)
+	}
+	return merged
+}
+
 func (self *ETreeBookParser) parseByte(c byte) error {
 	if self.state.builder == nil {
 		return errors.New("nil book builder, must call SetBook before parsing!")
@@ -117,7 +151,9 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 		if c == '<' {
 			// Process pending text outside w
 			if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
-				for f := range strings.FieldsSeq(self.state.pending_text.String()) {
+				fields := strings.Fields(self.state.pending_text.String())
+				merged := mergeContractions(fields)
+				for _, f := range merged {
 					add_err := self.state.builder.AddWord(self.state.vref, "", f)
 					if add_err != nil {
 						return add_err
@@ -248,7 +284,9 @@ func (self *ETreeBookParser) Flush() (IBook, error) {
 		return nil, errors.New("nil book builder (was .Flush called twice or without SetBook?)")
 	}
 	if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
-		for f := range strings.FieldsSeq(self.state.pending_text.String()) {
+		fields := strings.Fields(self.state.pending_text.String())
+		merged := mergeContractions(fields)
+		for _, f := range merged {
 			add_err := self.state.builder.AddWord(self.state.vref, "", f)
 			if add_err != nil {
 				return nil, add_err
@@ -286,7 +324,7 @@ func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) 
 		}
 	case "ve":
 		self.state.vopen = false
-	case "f":
+	case "f", "x":
 		self.state.note_depth++
 	}
 	return nil
@@ -310,7 +348,7 @@ func (self *ETreeBookParser) handleCloseTag(tag string) error {
 			self.state.wopen = false
 			self.state.sref = ""
 		}
-	case "f":
+	case "f", "x":
 		self.state.note_depth--
 	}
 	return nil
@@ -368,14 +406,6 @@ func NewBookBuilder(id string) IBookBuilder {
 
 func (b *bookBuilder) ID() string {
 	return b.book.id
-}
-
-func isContractionSuffix(word string) bool {
-	switch strings.ToLower(word) {
-	case "s", "t", "re", "ll", "ve", "d", "m":
-		return true
-	}
-	return false
 }
 
 func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) error {
