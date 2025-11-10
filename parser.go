@@ -132,9 +132,9 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			self.state.current_attr_name = ""
 			self.state.current_attr_value = ""
 		} else {
-			if self.state.wopen {
+			if self.state.wopen && self.state.note_depth == 0 {
 				self.state.current_buffer.WriteByte(c)
-			} else if self.state.vopen {
+			} else if self.state.vopen && self.state.note_depth == 0 {
 				self.state.pending_text.WriteByte(c)
 			}
 			// Ignore text outside verse
@@ -245,7 +245,7 @@ func (self *ETreeBookParser) Write(b []byte) (int, error) {
 
 func (self *ETreeBookParser) Flush() (IBook, error) {
 	if self.state.builder == nil {
-		return nil, errors.New("nil book builder (was .Flush called twice?)")
+		return nil, errors.New("nil book builder (was .Flush called twice or without SetBook?)")
 	}
 	if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
 		for f := range strings.FieldsSeq(self.state.pending_text.String()) {
@@ -256,10 +256,8 @@ func (self *ETreeBookParser) Flush() (IBook, error) {
 		}
 		self.state.pending_text.Reset()
 	}
-
 	book := self.state.builder.Build()
 	self.state.builder = nil
-
 	return book, nil
 }
 
@@ -359,7 +357,6 @@ type bookBuilder struct {
 	last_verse      uint8
 	current_chapter *chapter
 	current_verse   *verse
-	pre_punct       strings.Builder
 	last_word       *word
 }
 
@@ -420,27 +417,18 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 		b.last_verse = vu8
 		b.last_word = nil
 	}
-	var full_text string
-	if sref != "" {
-		full_text = b.pre_punct.String() + word_fulltext
-		b.pre_punct.Reset()
-	} else {
-		if isAllPunct(word_fulltext) {
-			if b.last_word != nil {
-				b.last_word.full_text += word_fulltext
-			}
-			return nil // ignore if no last word
-		} else {
-			full_text = b.pre_punct.String() + word_fulltext
-			b.pre_punct.Reset()
+	if isAllPunct(word_fulltext) {
+		if b.last_word != nil {
+			b.last_word.full_text += word_fulltext
 		}
+		return nil // ignore if no last word
 	}
 	new_word := &word{
 		book:      b.book,
 		chapter:   b.current_chapter,
 		verse:     b.current_verse,
 		strongs:   strongs,
-		full_text: full_text,
+		full_text: word_fulltext,
 	}
 	b.current_verse.words = append(b.current_verse.words, new_word)
 	b.last_word = new_word
@@ -448,10 +436,6 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 }
 
 func (b *bookBuilder) Build() IBook {
-	if b.pre_punct.Len() > 0 && b.last_word != nil {
-		b.last_word.full_text += b.pre_punct.String()
-		b.pre_punct.Reset()
-	}
 	return b.book
 }
 
