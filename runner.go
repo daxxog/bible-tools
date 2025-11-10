@@ -31,7 +31,7 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 			i := 0
 			for word := range book.Words() {
 				i++
-				fmt.Fprintf(out, "%d['%s'][\"%s\"]\n", i, word.Verse().ID(), word.FullText())
+				fmt.Fprintf(out, "%d['%s'][\"%s\"]{%s}\n", i, word.Verse().ID(), word.FullText(), word.StrongsNumber())
 			}
 		} else {
 			return err
