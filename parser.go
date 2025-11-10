@@ -39,7 +39,7 @@ type ETreeBookParserState struct {
 	vopen           bool         // inner verse parser (v tag open)
 	wopen           bool         // inner word parser (w tag open)
 	vref            string       // current verse reference (e.g. "JHN.21.4")
-	sref            string       // current strongs reference, reset to "" (nil IStrongsNumber) when wopen is set to false
+	sref            string       // current strongs reference, reset to "" when wopen = false
 	current_chapter uint8
 	note_depth      int // to skip footnotes
 
@@ -52,7 +52,6 @@ type ETreeBookParserState struct {
 	current_attr_value string
 	current_buffer     strings.Builder // for text inside w
 	pending_text       strings.Builder // for text outside w
-	pending_apostrophe bool            // true when we have seen a lone ’/’ outside <w>
 }
 
 type ETreeBookParser struct {
@@ -85,7 +84,6 @@ func (self *ETreeBookParser) WriteSettings() etree.WriteSettings {
 }
 
 func (self *ETreeBookParser) WriteByte(c byte) error {
-	// Debug output
 	var b [1]byte
 	b[0] = c
 	_, err := fmt.Fprintf(self.debug_writer, "WriteByte(%b, %q)\n", b, c)
@@ -145,19 +143,6 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 		return errors.New("nil book builder, must call SetBook before parsing!")
 	}
 
-	// ------------------------------------------------------------------
-	// 1. Detect a lone apostrophe outside a <w> tag
-	// ------------------------------------------------------------------
-	if self.state.parse_state == stateText && self.state.vopen && self.state.note_depth == 0 && !self.state.wopen {
-		if c == '\'' || string(c) == "’" { // straight or curved apostrophe
-			self.state.pending_apostrophe = true
-			return nil
-		}
-	}
-
-	// ------------------------------------------------------------------
-	// 2. Normal state-machine
-	// ------------------------------------------------------------------
 	switch self.state.parse_state {
 	case stateText:
 		if c == '<' {
@@ -179,7 +164,6 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			self.state.attrs = make(map[string]string)
 			self.state.current_attr_name = ""
 			self.state.current_attr_value = ""
-			self.state.pending_apostrophe = false
 		} else {
 			if self.state.wopen && self.state.note_depth == 0 {
 				self.state.current_buffer.WriteByte(c)
@@ -200,7 +184,7 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			if !self.state.is_closing {
 				self.state.parse_state = stateAttrSpace
 			} else {
-				return fmt.Errorf("unexpected space in closing tag")
+				return fmt.Errorf("unexpected space in closing tag#issue")
 			}
 		case '>':
 			self.state.parse_state = stateText
@@ -329,10 +313,6 @@ func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) 
 			self.state.sref = attrs["s"]
 			self.state.wopen = true
 			self.state.current_buffer.Reset()
-			if self.state.pending_apostrophe {
-				self.state.current_buffer.WriteString("’") // string, not byte
-				self.state.pending_apostrophe = false
-			}
 		}
 	case "ve":
 		self.state.vopen = false
@@ -351,12 +331,6 @@ func (self *ETreeBookParser) handleCloseTag(tag string) error {
 	case "w":
 		if self.state.note_depth == 0 {
 			fulltext := strings.TrimSpace(self.state.current_buffer.String())
-
-			if self.state.pending_apostrophe && self.state.builder != nil {
-				_ = self.state.builder.AddWord(self.state.vref, "", "’")
-				self.state.pending_apostrophe = false
-			}
-
 			if fulltext != "" {
 				add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext)
 				if add_err != nil {
@@ -439,42 +413,58 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 		b.last_verse = vu8
 		b.last_word = nil
 	}
+
+	// ———————————————————————————
+	// 1. Merge ’s, ’t, etc. with previous word
+	// ———————————————————————————
 	if b.last_word != nil {
-		if strings.HasSuffix(b.last_word.full_text, "’") && isContractionSuffix(word_fulltext) {
-			b.last_word.full_text += word_fulltext
-			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
-				b.last_word.strongs = strongs
+		last := b.last_word.full_text
+		if len(last) > 0 && unicode.IsLetter(rune(last[len(last)-1])) {
+			// Noah’s, God’s, etc.
+			if word_fulltext == "’s" || word_fulltext == "'s" {
+				b.last_word.full_text += word_fulltext
+				return nil
 			}
-			return nil
-		} else if strings.HasPrefix(word_fulltext, "’") && isContractionSuffix(word_fulltext[1:]) {
-			b.last_word.full_text += word_fulltext
-			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
-				b.last_word.strongs = strongs
-			}
-			return nil
-		}
-	}
-
-	// Special case: lone apostrophe dummy call
-	if word_fulltext == "’" && sref == "" && b.last_word != nil {
-		b.last_word.full_text += word_fulltext
-		if b.last_word.strongs.Type() == "" && b.current_verse != nil {
-			for i := len(b.current_verse.words) - 1; i >= 0; i-- {
-				if w := b.current_verse.words[i]; w.strongs.Type() != "" {
-					b.last_word.strongs = w.strongs
-					break
+			// don’t, can’t, won’t
+			if strings.HasSuffix(last, "n") && (word_fulltext == "’t" || word_fulltext == "'t") {
+				b.last_word.full_text += word_fulltext
+				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
+					b.last_word.strongs = strongs
 				}
+				return nil
 			}
 		}
-		return nil
+
+		// Existing contraction logic (e.g. ’re, ’ll)
+		if strings.HasSuffix(last, "’") && isContractionSuffix(word_fulltext) {
+			b.last_word.full_text += word_fulltext
+			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
+				b.last_word.strongs = strongs
+			}
+			return nil
+		}
+		if strings.HasPrefix(word_fulltext, "’") && isContractionSuffix(word_fulltext[1:]) {
+			b.last_word.full_text += word_fulltext
+			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
+				b.last_word.strongs = strongs
+			}
+			return nil
+		}
 	}
 
+	// ———————————————————————————
+	// 2. Punctuation
+	// ———————————————————————————
 	if isAllPunct(word_fulltext) {
 		if b.last_word != nil {
 			b.last_word.full_text += word_fulltext
 		}
 		return nil
 	}
+
+	// ———————————————————————————
+	// 3. New word
+	// ———————————————————————————
 	new_word := &word{
 		book:      b.book,
 		chapter:   b.current_chapter,
