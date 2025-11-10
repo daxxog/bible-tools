@@ -52,6 +52,7 @@ type ETreeBookParserState struct {
 	current_attr_value string
 	current_buffer     strings.Builder // for text inside w
 	pending_text       strings.Builder // for text outside w
+	pending_apostrophe bool            // true when we have seen a lone ’/’ outside <w>
 }
 
 type ETreeBookParser struct {
@@ -144,7 +145,19 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 		return errors.New("nil book builder, must call SetBook before parsing!")
 	}
 
-	// Parse logic
+	// ------------------------------------------------------------------
+	// 1. Detect a lone apostrophe outside a <w> tag
+	// ------------------------------------------------------------------
+	if self.state.parse_state == stateText && self.state.vopen && self.state.note_depth == 0 && !self.state.wopen {
+		if c == '\'' || string(c) == "’" { // straight or curved apostrophe
+			self.state.pending_apostrophe = true
+			return nil
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// 2. Normal state-machine
+	// ------------------------------------------------------------------
 	switch self.state.parse_state {
 	case stateText:
 		if c == '<' {
@@ -166,13 +179,13 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 			self.state.attrs = make(map[string]string)
 			self.state.current_attr_name = ""
 			self.state.current_attr_value = ""
+			self.state.pending_apostrophe = false
 		} else {
 			if self.state.wopen && self.state.note_depth == 0 {
 				self.state.current_buffer.WriteByte(c)
 			} else if self.state.vopen && self.state.note_depth == 0 {
 				self.state.pending_text.WriteByte(c)
 			}
-			// Ignore text outside verse
 		}
 	case stateTagOpen:
 		if c == '/' {
@@ -249,12 +262,10 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 }
 
 func (self *ETreeBookParser) WriteString(s string) (int, error) {
-	// Debug
 	n, err := fmt.Fprintf(self.debug_writer, "WriteString(%q)\n", s)
 	if err != nil {
 		return n, err
 	}
-	// Parse
 	for _, c := range []byte(s) {
 		if err := self.parseByte(c); err != nil {
 			return 0, err
@@ -264,12 +275,10 @@ func (self *ETreeBookParser) WriteString(s string) (int, error) {
 }
 
 func (self *ETreeBookParser) Write(b []byte) (int, error) {
-	// Debug
 	n, err := fmt.Fprintf(self.debug_writer, "Write(%q)\n", b)
 	if err != nil {
 		return n, err
 	}
-	// Parse
 	for _, c := range b {
 		if err := self.parseByte(c); err != nil {
 			return 0, err
@@ -320,6 +329,10 @@ func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) 
 			self.state.sref = attrs["s"]
 			self.state.wopen = true
 			self.state.current_buffer.Reset()
+			if self.state.pending_apostrophe {
+				self.state.current_buffer.WriteString("’") // string, not byte
+				self.state.pending_apostrophe = false
+			}
 		}
 	case "ve":
 		self.state.vopen = false
@@ -338,6 +351,12 @@ func (self *ETreeBookParser) handleCloseTag(tag string) error {
 	case "w":
 		if self.state.note_depth == 0 {
 			fulltext := strings.TrimSpace(self.state.current_buffer.String())
+
+			if self.state.pending_apostrophe && self.state.builder != nil {
+				_ = self.state.builder.AddWord(self.state.vref, "", "’")
+				self.state.pending_apostrophe = false
+			}
+
 			if fulltext != "" {
 				add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext)
 				if add_err != nil {
@@ -435,11 +454,26 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 			return nil
 		}
 	}
+
+	// Special case: lone apostrophe dummy call
+	if word_fulltext == "’" && sref == "" && b.last_word != nil {
+		b.last_word.full_text += word_fulltext
+		if b.last_word.strongs.Type() == "" && b.current_verse != nil {
+			for i := len(b.current_verse.words) - 1; i >= 0; i-- {
+				if w := b.current_verse.words[i]; w.strongs.Type() != "" {
+					b.last_word.strongs = w.strongs
+					break
+				}
+			}
+		}
+		return nil
+	}
+
 	if isAllPunct(word_fulltext) {
 		if b.last_word != nil {
 			b.last_word.full_text += word_fulltext
 		}
-		return nil // ignore if no last word
+		return nil
 	}
 	new_word := &word{
 		book:      b.book,
