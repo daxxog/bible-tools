@@ -370,6 +370,14 @@ func (b *bookBuilder) ID() string {
 	return b.book.id
 }
 
+func isContractionSuffix(word string) bool {
+	switch strings.ToLower(word) {
+	case "s", "t", "re", "ll", "ve", "d", "m":
+		return true
+	}
+	return false
+}
+
 func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) error {
 	parts := strings.Split(vref, ".")
 	if len(parts) != 3 {
@@ -416,6 +424,21 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 		b.current_verse = new_vs
 		b.last_verse = vu8
 		b.last_word = nil
+	}
+	if b.last_word != nil {
+		if strings.HasSuffix(b.last_word.full_text, "’") && isContractionSuffix(word_fulltext) {
+			b.last_word.full_text += word_fulltext
+			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
+				b.last_word.strongs = strongs
+			}
+			return nil
+		} else if strings.HasPrefix(word_fulltext, "’") && isContractionSuffix(word_fulltext[1:]) {
+			b.last_word.full_text += word_fulltext
+			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
+				b.last_word.strongs = strongs
+			}
+			return nil
+		}
 	}
 	if isAllPunct(word_fulltext) {
 		if b.last_word != nil {
