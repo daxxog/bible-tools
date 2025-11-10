@@ -12,7 +12,8 @@ import (
 	"github.com/beevik/etree"
 )
 
-type devNullWriter struct { }
+type devNullWriter struct{}
+
 func (*devNullWriter) Write(p []byte) (n int, err error) { return len(p), nil }
 func DevNullWriter() io.Writer {
 	return &devNullWriter{}
@@ -33,23 +34,24 @@ const (
 )
 
 type ETreeBookParserState struct {
-	book            string // three character book id (e.g. "GEN", "JHN")
+	book            string       // three character book id (e.g. "GEN", "JHN")
 	builder         IBookBuilder // builder for the current book
-	vopen           bool // inner verse parser (v tag open)
-	wopen           bool // inner word parser (w tag open)
-	vref            string // current verse reference (e.g. "JHN.21.4")
-	sref            string // current strongs reference, reset to "" (nil IStrongsNumber) when wopen is set to false
+	vopen           bool         // inner verse parser (v tag open)
+	wopen           bool         // inner word parser (w tag open)
+	vref            string       // current verse reference (e.g. "JHN.21.4")
+	sref            string       // current strongs reference, reset to "" (nil IStrongsNumber) when wopen is set to false
 	current_chapter uint8
+	note_depth      int // to skip footnotes
 
 	// Parser state
-	parse_state     parseState
-	is_closing      bool
-	current_tag     string
-	attrs           map[string]string
-	current_attr_name string
+	parse_state        parseState
+	is_closing         bool
+	current_tag        string
+	attrs              map[string]string
+	current_attr_name  string
 	current_attr_value string
-	current_buffer  strings.Builder // for text inside w
-	pending_text    strings.Builder // for text outside w
+	current_buffer     strings.Builder // for text inside w
+	pending_text       strings.Builder // for text outside w
 }
 
 type ETreeBookParser struct {
@@ -92,6 +94,18 @@ func (self *ETreeBookParser) WriteByte(c byte) error {
 	return self.parseByte(c)
 }
 
+func isAllPunct(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPunct(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func (self *ETreeBookParser) parseByte(c byte) error {
 	if self.state.builder == nil {
 		return errors.New("nil book builder, must call SetBook before parsing!")
@@ -102,7 +116,7 @@ func (self *ETreeBookParser) parseByte(c byte) error {
 	case stateText:
 		if c == '<' {
 			// Process pending text outside w
-			if self.state.vopen && !self.state.wopen {
+			if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
 				for f := range strings.FieldsSeq(self.state.pending_text.String()) {
 					add_err := self.state.builder.AddWord(self.state.vref, "", f)
 					if add_err != nil {
@@ -233,8 +247,7 @@ func (self *ETreeBookParser) Flush() (IBook, error) {
 	if self.state.builder == nil {
 		return nil, errors.New("nil book builder (was .Flush called twice?)")
 	}
-
-	if self.state.vopen && !self.state.wopen {
+	if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
 		for f := range strings.FieldsSeq(self.state.pending_text.String()) {
 			add_err := self.state.builder.AddWord(self.state.vref, "", f)
 			if add_err != nil {
@@ -268,11 +281,15 @@ func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) 
 		self.state.vref = fmt.Sprintf("%s.%d.%d", self.state.book, self.state.current_chapter, n)
 		self.state.vopen = true
 	case "w":
-		self.state.sref = attrs["s"]
-		self.state.wopen = true
-		self.state.current_buffer.Reset()
+		if self.state.note_depth == 0 {
+			self.state.sref = attrs["s"]
+			self.state.wopen = true
+			self.state.current_buffer.Reset()
+		}
 	case "ve":
 		self.state.vopen = false
+	case "f":
+		self.state.note_depth++
 	}
 	return nil
 }
@@ -284,15 +301,19 @@ func (self *ETreeBookParser) handleCloseTag(tag string) error {
 	case "v":
 		self.state.vopen = false
 	case "w":
-		fulltext := strings.TrimSpace(self.state.current_buffer.String())
-		if fulltext != "" {
-			add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext)
-			if add_err != nil {
-				return add_err
+		if self.state.note_depth == 0 {
+			fulltext := strings.TrimSpace(self.state.current_buffer.String())
+			if fulltext != "" {
+				add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext)
+				if add_err != nil {
+					return add_err
+				}
 			}
+			self.state.wopen = false
+			self.state.sref = ""
 		}
-		self.state.wopen = false
-		self.state.sref = ""
+	case "f":
+		self.state.note_depth--
 	}
 	return nil
 }
@@ -303,8 +324,8 @@ type strongsNumber struct {
 	value        uint16
 }
 
-func (s *strongsNumber) Type() string   { return s.strongs_type }
-func (s *strongsNumber) Value() uint16  { return s.value }
+func (s *strongsNumber) Type() string  { return s.strongs_type }
+func (s *strongsNumber) Value() uint16 { return s.value }
 func (s *strongsNumber) String() string {
 	if s.value == 0 {
 		return ""
@@ -338,6 +359,8 @@ type bookBuilder struct {
 	last_verse      uint8
 	current_chapter *chapter
 	current_verse   *verse
+	pre_punct       strings.Builder
+	last_word       *word
 }
 
 func NewBookBuilder(id string) IBookBuilder {
@@ -385,6 +408,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 		b.last_chapter = cu8
 		b.last_verse = 0
 		b.current_verse = nil
+		b.last_word = nil
 	}
 	if vu8 != b.last_verse {
 		if vu8 < b.last_verse {
@@ -394,19 +418,40 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 		b.current_chapter.verses = append(b.current_chapter.verses, new_vs)
 		b.current_verse = new_vs
 		b.last_verse = vu8
+		b.last_word = nil
+	}
+	var full_text string
+	if sref != "" {
+		full_text = b.pre_punct.String() + word_fulltext
+		b.pre_punct.Reset()
+	} else {
+		if isAllPunct(word_fulltext) {
+			if b.last_word != nil {
+				b.last_word.full_text += word_fulltext
+			}
+			return nil // ignore if no last word
+		} else {
+			full_text = b.pre_punct.String() + word_fulltext
+			b.pre_punct.Reset()
+		}
 	}
 	new_word := &word{
 		book:      b.book,
 		chapter:   b.current_chapter,
 		verse:     b.current_verse,
 		strongs:   strongs,
-		full_text: word_fulltext,
+		full_text: full_text,
 	}
 	b.current_verse.words = append(b.current_verse.words, new_word)
+	b.last_word = new_word
 	return nil
 }
 
 func (b *bookBuilder) Build() IBook {
+	if b.pre_punct.Len() > 0 && b.last_word != nil {
+		b.last_word.full_text += b.pre_punct.String()
+		b.pre_punct.Reset()
+	}
 	return b.book
 }
 
@@ -452,9 +497,9 @@ func (b *book) Words() iter.Seq[IWord] {
 }
 
 type chapter struct {
-	book    IBook
-	number  uint8
-	verses  []*verse
+	book   IBook
+	number uint8
+	verses []*verse
 }
 
 func (c *chapter) ID() string    { return fmt.Sprintf("%s.%d", c.book.ID(), c.number) }
@@ -482,15 +527,15 @@ func (c *chapter) Words() iter.Seq[IWord] {
 }
 
 type verse struct {
-	book     IBook
-	chapter  IChapter
-	number   uint8
-	words    []*word
+	book    IBook
+	chapter IChapter
+	number  uint8
+	words   []*word
 }
 
-func (v *verse) ID() string     { return fmt.Sprintf("%s.%d", v.chapter.ID(), v.number) }
-func (v *verse) Number() uint8  { return v.number }
-func (v *verse) Book() IBook    { return v.book }
+func (v *verse) ID() string        { return fmt.Sprintf("%s.%d", v.chapter.ID(), v.number) }
+func (v *verse) Number() uint8     { return v.number }
+func (v *verse) Book() IBook       { return v.book }
 func (v *verse) Chapter() IChapter { return v.chapter }
 func (v *verse) Words() iter.Seq[IWord] {
 	return func(yield func(IWord) bool) {
@@ -510,11 +555,11 @@ type word struct {
 	full_text string
 }
 
-func (w *word) Book() IBook                  { return w.book }
-func (w *word) Chapter() IChapter            { return w.chapter }
-func (w *word) Verse() IVerse                { return w.verse }
+func (w *word) Book() IBook                   { return w.book }
+func (w *word) Chapter() IChapter             { return w.chapter }
+func (w *word) Verse() IVerse                 { return w.verse }
 func (w *word) StrongsNumber() IStrongsNumber { return w.strongs }
-func (w *word) FullText() string             { return w.full_text }
+func (w *word) FullText() string              { return w.full_text }
 func (w *word) Text() string {
 	var builder strings.Builder
 	for _, r := range strings.ToLower(w.full_text) {
