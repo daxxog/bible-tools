@@ -30,9 +30,14 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 			fmt.Fprintln(out, book.ID())
 			i := 0
 			// dnw := DevNullWriter()
+			xml_debug := false
 			for word := range book.Words() {
 				i++
-				fmt.Fprintf(out, "%d['%s'][\"%s\"]{%s}(%s)\n", i, word.Verse().ID(), word.FullText(), word.StrongsNumber(), word.XMLChunk())
+				if xml_debug {
+					fmt.Fprintf(out, "%d['%s'][\"%s\"]{%s}\t\t(%s)\n", i, word.Verse().ID(), word.FullText(), word.StrongsNumber(), word.XMLChunk())
+				} else {
+					fmt.Fprintf(out, "%d['%s'][\"%s\"]{%s}\n", i, word.Verse().ID(), word.FullText(), word.StrongsNumber())
+				}
 			}
 		} else {
 			return err
@@ -42,4 +47,3 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 
 	return nil
 }
-
