@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/beevik/etree"
+	"iter"
 )
 
 type devNullWriter struct{}
@@ -52,26 +53,140 @@ type ETreeBookParserState struct {
 	current_attr_value string
 	current_buffer     strings.Builder // for text inside w
 	pending_text       strings.Builder // for text outside w
+	pending_start      uint            // start pos for pending_text or w tag
+	tag_start_pos      uint            // start pos of current tag (<)
+
+	// XML tracking
+	xml_source     *[]byte       // pointer to current book's XML byte slice
+	current_writer io.ByteWriter // writer that appends to xml_source
 }
 
 type ETreeBookParser struct {
 	debug_writer io.Writer
 	state        *ETreeBookParserState
+	book_bytes   IXMLBookBytes // singleton manager for per-book XML byte arrays
 }
 
+// ——————————————————————————————————————————————————————————————————————
+// IXMLBookBytes implementation (singleton-style per-book byte arrays)
+// ——————————————————————————————————————————————————————————————————————
+type xmlBookBytes struct {
+	bufs map[string]*[]byte // book_id → *[]byte (shared reference)
+}
+
+func newXMLBookBytes() IXMLBookBytes {
+	return &xmlBookBytes{
+		bufs: make(map[string]*[]byte, 66), // Preallocate for ~66 Bible books
+	}
+}
+
+func (x *xmlBookBytes) BookBytes(book_id string) *[]byte {
+	p, ok := x.bufs[book_id]
+	if !ok {
+		s := make([]byte, 0, 4096) // Initial capacity for typical book XML
+		p = &s
+		x.bufs[book_id] = p
+	}
+	return p
+}
+
+func (x *xmlBookBytes) BookByteWriter(book_id string) io.ByteWriter {
+	return &sliceByteWriter{p: x.BookBytes(book_id)}
+}
+
+type sliceByteWriter struct {
+	p *[]byte // pointer to the slice for in-place append
+}
+
+func (w *sliceByteWriter) WriteByte(c byte) error {
+	*w.p = append(*w.p, c)
+	return nil
+}
+
+// ——————————————————————————————————————————————————————————————————————
+// IXMLChunk implementation (shared underlying array, zero-copy)
+// ——————————————————————————————————————————————————————————————————————
+type xmlChunk struct {
+	xml   []byte // shared reference to the full book XML
+	start uint   // inclusive start index
+	size  uint8  // length of the fragment (max 255)
+}
+
+func (c *xmlChunk) Bytes() iter.Seq[byte] {
+	return func(yield func(byte) bool) {
+		end := c.Start() + uint(c.ChunkSize())
+		for i := c.Start(); i < end; i++ {
+			if !yield(c.xml[i]) {
+				return
+			}
+		}
+	}
+}
+
+func (c *xmlChunk) ChunkSize() uint8 { return c.size }
+func (c *xmlChunk) Start() uint      { return c.start }
+func (c *xmlChunk) End() uint        { return c.Start() + uint(c.ChunkSize()) }
+
+func (c *xmlChunk) String() string {
+	b := c.xml[c.start:][:c.size]
+	s := string(b)
+	return fmt.Sprintf("%q (pos %d-%d=%d)", s, c.start, c.start+uint(c.size)-1, c.size)
+}
+
+func newXMLChunk(xml []byte, start uint, size uint8) IXMLChunk {
+	if start >= uint(len(xml)) {
+		start = uint(len(xml))
+	}
+	if int(start)+int(size) > len(xml) {
+		size = uint8(len(xml) - int(start))
+	}
+	if size == 0 {
+		size = 1 // never return zero-size chunk
+	}
+	return &xmlChunk{xml: xml, start: start, size: size}
+}
+
+// ——————————————————————————————————————————————————————————————————————
+// ETreeBookParser factory
+// ——————————————————————————————————————————————————————————————————————
 func NewEtreeParser() *ETreeBookParser {
 	return NewEtreeParserWithDebug(DevNullWriter())
 }
 
 func NewEtreeParserWithDebug(debug_writer io.Writer) *ETreeBookParser {
-	return &ETreeBookParser{debug_writer: debug_writer, state: &ETreeBookParserState{
-		parse_state: stateText,
-	}}
+	return &ETreeBookParser{
+		debug_writer: debug_writer,
+		state: &ETreeBookParserState{
+			parse_state:   stateText,
+			pending_start: 0,
+			tag_start_pos: 0,
+		},
+		book_bytes: newXMLBookBytes(),
+	}
 }
 
 func (self *ETreeBookParser) SetBook(book string) {
 	self.state.book = book
 	self.state.builder = NewBookBuilder(book)
+	self.state.xml_source = self.book_bytes.BookBytes(book)
+	self.state.current_writer = self.book_bytes.BookByteWriter(book)
+	self.state.pending_start = uint(len(*self.state.xml_source))
+	self.state.tag_start_pos = 0
+
+	// Reset parser state
+	self.state.current_chapter = 0
+	self.state.vopen = false
+	self.state.wopen = false
+	self.state.vref = ""
+	self.state.sref = ""
+	self.state.note_depth = 0
+	self.state.is_closing = false
+	self.state.current_tag = ""
+	self.state.attrs = nil
+	self.state.current_attr_name = ""
+	self.state.current_attr_value = ""
+	self.state.current_buffer.Reset()
+	self.state.pending_text.Reset()
 }
 
 func (self *ETreeBookParser) WriteSettings() etree.WriteSettings {
@@ -84,15 +199,252 @@ func (self *ETreeBookParser) WriteSettings() etree.WriteSettings {
 }
 
 func (self *ETreeBookParser) WriteByte(c byte) error {
-	var b [1]byte
-	b[0] = c
-	_, err := fmt.Fprintf(self.debug_writer, "WriteByte(%b, %q)\n", b, c)
+	if err := self.state.current_writer.WriteByte(c); err != nil {
+		return err
+	}
+	pos := uint(len(*self.state.xml_source)) - 1
+	_, err := fmt.Fprintf(self.debug_writer, "WriteByte(%b, %q) pos=%d\n", c, c, pos)
 	if err != nil {
 		return err
 	}
-	return self.parseByte(c)
+	return self.parseByte(c, pos)
 }
 
+func (self *ETreeBookParser) WriteString(s string) (int, error) {
+	_, err := fmt.Fprintf(self.debug_writer, "WriteString(%q)\n", s)
+	if err != nil {
+		return 0, err
+	}
+	for i := 0; i < len(s); i++ {
+		if err := self.WriteByte(s[i]); err != nil {
+			return i, err
+		}
+	}
+	return len(s), nil
+}
+
+func (self *ETreeBookParser) Write(b []byte) (int, error) {
+	_, err := fmt.Fprintf(self.debug_writer, "Write(%q)\n", b)
+	if err != nil {
+		return 0, err
+	}
+	for i := 0; i < len(b); i++ {
+		if err := self.WriteByte(b[i]); err != nil {
+			return i, err
+		}
+	}
+	return len(b), nil
+}
+
+func (self *ETreeBookParser) Flush() (IBook, error) {
+	if self.state.builder == nil {
+		return nil, errors.New("nil book builder (was .Flush called twice or without SetBook?)")
+	}
+	if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
+		end_pos := uint(len(*self.state.xml_source))
+		if err := self.flushPendingText(end_pos); err != nil {
+			return nil, err
+		}
+	}
+	book := self.state.builder.Build()
+	self.state.builder = nil
+	return book, nil
+}
+
+// ——————————————————————————————————————————————————————————————————————
+// Core parsing logic
+// ——————————————————————————————————————————————————————————————————————
+func (self *ETreeBookParser) parseByte(c byte, pos uint) error {
+	if self.state.builder == nil {
+		return errors.New("nil book builder, must call SetBook before parsing!")
+	}
+
+	switch self.state.parse_state {
+	case stateText:
+		if c == '<' {
+			if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
+				if err := self.flushPendingText(pos); err != nil {
+					return err
+				}
+			}
+			self.state.tag_start_pos = pos
+			self.state.parse_state = stateTagOpen
+			self.state.is_closing = false
+			self.state.current_tag = ""
+			self.state.attrs = make(map[string]string)
+			self.state.current_attr_name = ""
+			self.state.current_attr_value = ""
+		} else {
+			if self.state.wopen && self.state.note_depth == 0 {
+				self.state.current_buffer.WriteByte(c)
+			} else if self.state.vopen && self.state.note_depth == 0 {
+				if self.state.pending_text.Len() == 0 {
+					self.state.pending_start = pos
+				}
+				self.state.pending_text.WriteByte(c)
+			}
+		}
+
+	case stateTagOpen:
+		if c == '/' {
+			self.state.is_closing = true
+		} else {
+			self.state.current_tag = string(c)
+			self.state.parse_state = stateTagName
+		}
+
+	case stateTagName:
+		switch c {
+		case ' ':
+			if !self.state.is_closing {
+				self.state.parse_state = stateAttrSpace
+			} else {
+				return fmt.Errorf("unexpected space in closing tag")
+			}
+		case '>':
+			self.state.parse_state = stateText
+			if self.state.is_closing {
+				return self.handleCloseTag(self.state.current_tag, pos)
+			} else {
+				return self.handleOpenTag(self.state.current_tag, self.state.attrs)
+			}
+		case '/':
+			if self.state.is_closing {
+				return fmt.Errorf("unexpected / in closing tag")
+			}
+			self.state.parse_state = stateSelfClose
+		default:
+			self.state.current_tag += string(c)
+		}
+
+	case stateAttrSpace:
+		switch c {
+		case ' ':
+			// skip
+		case '>':
+			self.state.parse_state = stateText
+			return self.handleOpenTag(self.state.current_tag, self.state.attrs)
+		case '/':
+			self.state.parse_state = stateSelfClose
+		default:
+			self.state.current_attr_name = string(c)
+			self.state.parse_state = stateAttrName
+		}
+
+	case stateAttrName:
+		if c == '=' {
+			self.state.parse_state = stateAttrEq
+		} else {
+			self.state.current_attr_name += string(c)
+		}
+
+	case stateAttrEq:
+		if c == '"' {
+			self.state.current_attr_value = ""
+			self.state.parse_state = stateAttrValue
+		} else {
+			return fmt.Errorf("unexpected character after =")
+		}
+
+	case stateAttrValue:
+		if c == '"' {
+			self.state.attrs[self.state.current_attr_name] = self.state.current_attr_value
+			self.state.parse_state = stateAttrSpace
+		} else {
+			self.state.current_attr_value += string(c)
+		}
+
+	case stateSelfClose:
+		if c == '>' {
+			self.state.parse_state = stateText
+			return self.handleOpenTag(self.state.current_tag, self.state.attrs)
+		} else {
+			return fmt.Errorf("expected > after / in self-closing tag")
+		}
+	}
+	return nil
+}
+
+func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) error {
+	switch tag {
+	case "c":
+		idstr := attrs["id"]
+		n, err := strconv.ParseUint(idstr, 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid chapter id: %s", idstr)
+		}
+		self.state.current_chapter = uint8(n)
+	case "v":
+		idstr := attrs["id"]
+		n, err := strconv.ParseUint(idstr, 10, 8)
+		if err != nil {
+			return fmt.Errorf("invalid verse id: %s", idstr)
+		}
+		self.state.vref = fmt.Sprintf("%s.%d.%d", self.state.book, self.state.current_chapter, n)
+		self.state.vopen = true
+	case "w":
+		if self.state.note_depth == 0 {
+			self.state.sref = attrs["s"]
+			self.state.wopen = true
+			self.state.current_buffer.Reset()
+			self.state.pending_start = self.state.tag_start_pos
+		}
+	case "ve":
+		self.state.vopen = false
+	case "f", "x":
+		self.state.note_depth++
+	}
+	return nil
+}
+
+func (self *ETreeBookParser) handleCloseTag(tag string, pos uint) error {
+	switch tag {
+	case "c":
+		// No action
+	case "v":
+		self.state.vopen = false
+	case "w":
+		if self.state.note_depth == 0 {
+			fulltext := strings.TrimSpace(self.state.current_buffer.String())
+			if fulltext != "" {
+				chunk_size := uint8(pos - self.state.pending_start + 1)
+				chunk := newXMLChunk(*self.state.xml_source, self.state.pending_start, chunk_size)
+				add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext, chunk)
+				if add_err != nil {
+					return add_err
+				}
+			}
+			self.state.wopen = false
+			self.state.sref = ""
+		}
+	case "f", "x":
+		self.state.note_depth--
+	}
+	return nil
+}
+
+func (self *ETreeBookParser) flushPendingText(end_pos uint) error {
+	if !self.state.vopen || self.state.wopen || self.state.note_depth != 0 {
+		return nil
+	}
+	fields := strings.Fields(self.state.pending_text.String())
+	merged := mergeContractions(fields)
+	chunk_size := uint8(end_pos - self.state.pending_start)
+	chunk := newXMLChunk(*self.state.xml_source, self.state.pending_start, chunk_size)
+	for _, f := range merged {
+		add_err := self.state.builder.AddWord(self.state.vref, "", f, chunk)
+		if add_err != nil {
+			return add_err
+		}
+	}
+	self.state.pending_text.Reset()
+	self.state.pending_start = end_pos
+	return nil
+}
+
+// ——————————————————————————————————————————————————————————————————————
+// Helper: contraction merging
+// ——————————————————————————————————————————————————————————————————————
 func isAllPunct(s string) bool {
 	if len(s) == 0 {
 		return false
@@ -120,12 +472,12 @@ func mergeContractions(fields []string) []string {
 		if len(merged) > 0 {
 			prevIdx := len(merged) - 1
 			prev := merged[prevIdx]
-			if strings.HasSuffix(prev, "’") && isContractionSuffix(f) {
+			if strings.HasSuffix(prev, "'") && isContractionSuffix(f) {
 				merged[prevIdx] = prev + f
 				continue
 			}
 			r, size := utf8.DecodeRuneInString(f)
-			if r == '’' {
+			if r == '\'' {
 				suffix := f[size:]
 				if isContractionSuffix(suffix) {
 					merged[prevIdx] = prev + f
@@ -138,215 +490,9 @@ func mergeContractions(fields []string) []string {
 	return merged
 }
 
-func (self *ETreeBookParser) parseByte(c byte) error {
-	if self.state.builder == nil {
-		return errors.New("nil book builder, must call SetBook before parsing!")
-	}
-
-	switch self.state.parse_state {
-	case stateText:
-		if c == '<' {
-			// Process pending text outside w
-			if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
-				fields := strings.Fields(self.state.pending_text.String())
-				merged := mergeContractions(fields)
-				for _, f := range merged {
-					add_err := self.state.builder.AddWord(self.state.vref, "", f)
-					if add_err != nil {
-						return add_err
-					}
-				}
-				self.state.pending_text.Reset()
-			}
-			self.state.parse_state = stateTagOpen
-			self.state.is_closing = false
-			self.state.current_tag = ""
-			self.state.attrs = make(map[string]string)
-			self.state.current_attr_name = ""
-			self.state.current_attr_value = ""
-		} else {
-			if self.state.wopen && self.state.note_depth == 0 {
-				self.state.current_buffer.WriteByte(c)
-			} else if self.state.vopen && self.state.note_depth == 0 {
-				self.state.pending_text.WriteByte(c)
-			}
-		}
-	case stateTagOpen:
-		if c == '/' {
-			self.state.is_closing = true
-		} else {
-			self.state.current_tag = string(c)
-			self.state.parse_state = stateTagName
-		}
-	case stateTagName:
-		switch c {
-		case ' ':
-			if !self.state.is_closing {
-				self.state.parse_state = stateAttrSpace
-			} else {
-				return fmt.Errorf("unexpected space in closing tag#issue")
-			}
-		case '>':
-			self.state.parse_state = stateText
-			if self.state.is_closing {
-				return self.handleCloseTag(self.state.current_tag)
-			} else {
-				return self.handleOpenTag(self.state.current_tag, self.state.attrs)
-			}
-		case '/':
-			if self.state.is_closing {
-				return fmt.Errorf("unexpected / in closing tag")
-			}
-			self.state.parse_state = stateSelfClose
-		default:
-			self.state.current_tag += string(c)
-		}
-	case stateAttrSpace:
-		switch c {
-		case ' ':
-			// Skip spaces
-		case '>':
-			self.state.parse_state = stateText
-			return self.handleOpenTag(self.state.current_tag, self.state.attrs)
-		case '/':
-			self.state.parse_state = stateSelfClose
-		default:
-			self.state.current_attr_name = string(c)
-			self.state.parse_state = stateAttrName
-		}
-	case stateAttrName:
-		if c == '=' {
-			self.state.parse_state = stateAttrEq
-		} else {
-			self.state.current_attr_name += string(c)
-		}
-	case stateAttrEq:
-		if c == '"' {
-			self.state.current_attr_value = ""
-			self.state.parse_state = stateAttrValue
-		} else {
-			return fmt.Errorf("unexpected character after =")
-		}
-	case stateAttrValue:
-		if c == '"' {
-			self.state.attrs[self.state.current_attr_name] = self.state.current_attr_value
-			self.state.parse_state = stateAttrSpace
-		} else {
-			self.state.current_attr_value += string(c)
-		}
-	case stateSelfClose:
-		if c == '>' {
-			self.state.parse_state = stateText
-			return self.handleOpenTag(self.state.current_tag, self.state.attrs)
-		} else {
-			return fmt.Errorf("expected > after / in self-closing tag")
-		}
-	}
-	return nil
-}
-
-func (self *ETreeBookParser) WriteString(s string) (int, error) {
-	n, err := fmt.Fprintf(self.debug_writer, "WriteString(%q)\n", s)
-	if err != nil {
-		return n, err
-	}
-	for _, c := range []byte(s) {
-		if err := self.parseByte(c); err != nil {
-			return 0, err
-		}
-	}
-	return len(s), nil
-}
-
-func (self *ETreeBookParser) Write(b []byte) (int, error) {
-	n, err := fmt.Fprintf(self.debug_writer, "Write(%q)\n", b)
-	if err != nil {
-		return n, err
-	}
-	for _, c := range b {
-		if err := self.parseByte(c); err != nil {
-			return 0, err
-		}
-	}
-	return len(b), nil
-}
-
-func (self *ETreeBookParser) Flush() (IBook, error) {
-	if self.state.builder == nil {
-		return nil, errors.New("nil book builder (was .Flush called twice or without SetBook?)")
-	}
-	if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
-		fields := strings.Fields(self.state.pending_text.String())
-		merged := mergeContractions(fields)
-		for _, f := range merged {
-			add_err := self.state.builder.AddWord(self.state.vref, "", f)
-			if add_err != nil {
-				return nil, add_err
-			}
-		}
-		self.state.pending_text.Reset()
-	}
-	book := self.state.builder.Build()
-	self.state.builder = nil
-	return book, nil
-}
-
-func (self *ETreeBookParser) handleOpenTag(tag string, attrs map[string]string) error {
-	switch tag {
-	case "c":
-		idstr := attrs["id"]
-		n, err := strconv.ParseUint(idstr, 10, 8)
-		if err != nil {
-			return fmt.Errorf("invalid chapter id: %s", idstr)
-		}
-		self.state.current_chapter = uint8(n)
-	case "v":
-		idstr := attrs["id"]
-		n, err := strconv.ParseUint(idstr, 10, 8)
-		if err != nil {
-			return fmt.Errorf("invalid verse id: %s", idstr)
-		}
-		self.state.vref = fmt.Sprintf("%s.%d.%d", self.state.book, self.state.current_chapter, n)
-		self.state.vopen = true
-	case "w":
-		if self.state.note_depth == 0 {
-			self.state.sref = attrs["s"]
-			self.state.wopen = true
-			self.state.current_buffer.Reset()
-		}
-	case "ve":
-		self.state.vopen = false
-	case "f", "x":
-		self.state.note_depth++
-	}
-	return nil
-}
-
-func (self *ETreeBookParser) handleCloseTag(tag string) error {
-	switch tag {
-	case "c":
-		// No action needed
-	case "v":
-		self.state.vopen = false
-	case "w":
-		if self.state.note_depth == 0 {
-			fulltext := strings.TrimSpace(self.state.current_buffer.String())
-			if fulltext != "" {
-				add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext)
-				if add_err != nil {
-					return add_err
-				}
-			}
-			self.state.wopen = false
-			self.state.sref = ""
-		}
-	case "f", "x":
-		self.state.note_depth--
-	}
-	return nil
-}
-
-// bookBuilder implements IBookBuilder.
+// ——————————————————————————————————————————————————————————————————————
+// bookBuilder implements IBookBuilder
+// ——————————————————————————————————————————————————————————————————————
 type bookBuilder struct {
 	book            *book
 	last_chapter    uint8
@@ -366,7 +512,7 @@ func (b *bookBuilder) ID() string {
 	return b.book.id
 }
 
-func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) error {
+func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, chunk IXMLChunk) error {
 	parts := strings.Split(vref, ".")
 	if len(parts) != 3 {
 		return fmt.Errorf("invalid vref: %s", vref)
@@ -391,6 +537,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 	}
 	cu8 := uint8(c_num)
 	vu8 := uint8(v_num)
+
 	if cu8 != b.last_chapter {
 		if cu8 < b.last_chapter {
 			return fmt.Errorf("chapters out of order: %d < %d [book.id=%s]", cu8, b.last_chapter, b.book.ID())
@@ -420,13 +567,11 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 	if b.last_word != nil {
 		last := b.last_word.full_text
 		if len(last) > 0 && unicode.IsLetter(rune(last[len(last)-1])) {
-			// Noah’s, God’s, etc.
-			if word_fulltext == "’s" || word_fulltext == "'s" {
+			if word_fulltext == "'s" || word_fulltext == "'s" {
 				b.last_word.full_text += word_fulltext
 				return nil
 			}
-			// don’t, can’t, won’t
-			if strings.HasSuffix(last, "n") && (word_fulltext == "’t" || word_fulltext == "'t") {
+			if strings.HasSuffix(last, "n") && (word_fulltext == "'t" || word_fulltext == "'t") {
 				b.last_word.full_text += word_fulltext
 				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
 					b.last_word.strongs = strongs
@@ -434,16 +579,14 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 				return nil
 			}
 		}
-
-		// Existing contraction logic (e.g. ’re, ’ll)
-		if strings.HasSuffix(last, "’") && isContractionSuffix(word_fulltext) {
+		if strings.HasSuffix(last, "'") && isContractionSuffix(word_fulltext) {
 			b.last_word.full_text += word_fulltext
 			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
 				b.last_word.strongs = strongs
 			}
 			return nil
 		}
-		if strings.HasPrefix(word_fulltext, "’") && isContractionSuffix(word_fulltext[1:]) {
+		if strings.HasPrefix(word_fulltext, "'") && isContractionSuffix(word_fulltext[1:]) {
 			b.last_word.full_text += word_fulltext
 			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
 				b.last_word.strongs = strongs
@@ -471,6 +614,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string) er
 		verse:     b.current_verse,
 		strongs:   strongs,
 		full_text: word_fulltext,
+		xml_chunk: chunk,
 	}
 	b.current_verse.words = append(b.current_verse.words, new_word)
 	b.last_word = new_word
@@ -481,13 +625,16 @@ func (b *bookBuilder) Build() IBook {
 	return b.book
 }
 
+// ——————————————————————————————————————————————————————————————————————
 // word implements IWord
+// ——————————————————————————————————————————————————————————————————————
 type word struct {
 	book      IBook
 	chapter   IChapter
 	verse     IVerse
 	strongs   IStrongsNumber
 	full_text string
+	xml_chunk IXMLChunk
 }
 
 func (w *word) Book() IBook                   { return w.book }
@@ -504,3 +651,4 @@ func (w *word) Text() string {
 	}
 	return builder.String()
 }
+func (w *word) XMLChunk() IXMLChunk { return w.xml_chunk }

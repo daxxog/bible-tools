@@ -2,8 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"iter"
 )
+
+type IXMLBookBytes interface {
+	BookBytes(book_id string) *[]byte            // return a reference to the existing byte array or initialize a new one (Singleton pattern)
+	BookByteWriter(book_id string) io.ByteWriter // return a writer which can safely append to the underlying byte array (creating one if needed) for a specific book_id
+}
 
 type IBook interface {
 	ID() string                   // three character book id (e.g. "GEN", "JHN")
@@ -35,6 +41,7 @@ type IWord interface {
 	StrongsNumber() IStrongsNumber // concordance reference
 	Text() string                  // Lowercase text stripped of whitespace and punctuation
 	FullText() string              // Text (with punctuation / capitalization), whitespace preserved
+	XMLChunk() IXMLChunk           // chunk of XML this word was parsed from
 }
 
 type IStrongsNumber interface {
@@ -43,8 +50,16 @@ type IStrongsNumber interface {
 	fmt.Stringer   // raw string representation (e.g. "H6212", "G1456") [empty string "" for nil]
 }
 
+type IXMLChunk interface {
+	Bytes() iter.Seq[byte] // sequence of bytes representing the chunk of XML from the larger byte array
+	ChunkSize() uint8      // size of the XML chunk—the goal when chunking is to include the entire word + enough before and after to reason about when debugging
+	Start() uint           // starting position of this chunk in the complete XML byte array
+	End() uint             // Start + ChunkSize
+	fmt.Stringer           // string representation of this chunk of XML
+}
+
 type IBookBuilder interface {
-	ID() string                                                   // three character book id (e.g. "GEN", "JHN")
-	AddWord(vref string, sref string, word_fulltext string) error // returns an error if attempting to add a word outside of the book, or if an invalid strongs reference is passed
-	Build() IBook                                                 // finalize the structure
+	ID() string                                                                        // three character book id (e.g. "GEN", "JHN")
+	AddWord(vref string, sref string, word_fulltext string, xml_chunk IXMLChunk) error // returns an error if attempting to add a word outside of the book, or if an invalid strongs reference is passed
+	Build() IBook                                                                      // finalize the structure
 }

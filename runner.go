@@ -29,9 +29,10 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 		if book, err := o.Flush(); err == nil {
 			fmt.Fprintln(out, book.ID())
 			i := 0
+			// dnw := DevNullWriter()
 			for word := range book.Words() {
 				i++
-				fmt.Fprintf(out, "%d['%s'][\"%s\"]{%s}\n", i, word.Verse().ID(), word.FullText(), word.StrongsNumber())
+				fmt.Fprintf(out, "%d['%s'][\"%s\"]{%s}(%s)\n", i, word.Verse().ID(), word.FullText(), word.StrongsNumber(), word.XMLChunk())
 			}
 		} else {
 			return err
