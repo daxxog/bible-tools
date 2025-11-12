@@ -128,9 +128,13 @@ func (c *xmlChunk) Start() uint      { return c.start }
 func (c *xmlChunk) End() uint        { return c.Start() + uint(c.ChunkSize()) }
 
 func (c *xmlChunk) String() string {
+	const maxDisplay = 120
 	b := c.xml[c.start:][:c.size]
 	s := string(b)
-	return fmt.Sprintf("%q (pos %d-%d=%d)", s, c.start, c.start+uint(c.size)-1, c.size)
+	if len(s) > maxDisplay {
+		s = s[:maxDisplay-3] + "..."
+	}
+	return fmt.Sprintf("%q (pos %d-%d, size %d)", s, c.start, c.start+uint(c.size)-1, c.size)
 }
 
 func newXMLChunk(xml []byte, start uint, size uint8) IXMLChunk {
@@ -407,8 +411,13 @@ func (self *ETreeBookParser) handleCloseTag(tag string, pos uint) error {
 		if self.state.note_depth == 0 {
 			fulltext := strings.TrimSpace(self.state.current_buffer.String())
 			if fulltext != "" {
-				chunk_size := uint8(pos - self.state.pending_start + 1)
-				chunk := newXMLChunk(*self.state.xml_source, self.state.pending_start, chunk_size)
+				const context uint = 20
+				start := self.state.pending_start
+				if start > context {
+					start -= context
+				}
+				chunk_size := uint8(pos - start + 1 + context)
+				chunk := newXMLChunk(*self.state.xml_source, start, chunk_size)
 				add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext, chunk)
 				if add_err != nil {
 					return add_err
@@ -429,8 +438,13 @@ func (self *ETreeBookParser) flushPendingText(end_pos uint) error {
 	}
 	fields := strings.Fields(self.state.pending_text.String())
 	merged := mergeContractions(fields)
-	chunk_size := uint8(end_pos - self.state.pending_start)
-	chunk := newXMLChunk(*self.state.xml_source, self.state.pending_start, chunk_size)
+	const context uint = 20
+	start := self.state.pending_start
+	if start > context {
+		start -= context
+	}
+	chunk_size := uint8(end_pos - start + context)
+	chunk := newXMLChunk(*self.state.xml_source, start, chunk_size)
 	for _, f := range merged {
 		add_err := self.state.builder.AddWord(self.state.vref, "", f, chunk)
 		if add_err != nil {
@@ -472,12 +486,14 @@ func mergeContractions(fields []string) []string {
 		if len(merged) > 0 {
 			prevIdx := len(merged) - 1
 			prev := merged[prevIdx]
-			if strings.HasSuffix(prev, "'") && isContractionSuffix(f) {
-				merged[prevIdx] = prev + f
-				continue
+			if strings.HasSuffix(prev, "’") || strings.HasSuffix(prev, "'") {
+				if isContractionSuffix(f) {
+					merged[prevIdx] = prev + f
+					continue
+				}
 			}
 			r, size := utf8.DecodeRuneInString(f)
-			if r == '\'' {
+			if r == '’' || r == '\'' {
 				suffix := f[size:]
 				if isContractionSuffix(suffix) {
 					merged[prevIdx] = prev + f
@@ -567,11 +583,11 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, ch
 	if b.last_word != nil {
 		last := b.last_word.full_text
 		if len(last) > 0 && unicode.IsLetter(rune(last[len(last)-1])) {
-			if word_fulltext == "'s" || word_fulltext == "'s" {
+			if word_fulltext == "’s" || word_fulltext == "'s" {
 				b.last_word.full_text += word_fulltext
 				return nil
 			}
-			if strings.HasSuffix(last, "n") && (word_fulltext == "'t" || word_fulltext == "'t") {
+			if strings.HasSuffix(last, "n") && (word_fulltext == "’t" || word_fulltext == "'t") {
 				b.last_word.full_text += word_fulltext
 				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
 					b.last_word.strongs = strongs
@@ -579,19 +595,24 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, ch
 				return nil
 			}
 		}
-		if strings.HasSuffix(last, "'") && isContractionSuffix(word_fulltext) {
-			b.last_word.full_text += word_fulltext
-			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
-				b.last_word.strongs = strongs
+		// Existing contraction logic (e.g. ’re, ’ll)
+		if strings.HasSuffix(last, "’") || strings.HasSuffix(last, "'") {
+			if isContractionSuffix(word_fulltext) {
+				b.last_word.full_text += word_fulltext
+				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
+					b.last_word.strongs = strongs
+				}
+				return nil
 			}
-			return nil
 		}
-		if strings.HasPrefix(word_fulltext, "'") && isContractionSuffix(word_fulltext[1:]) {
-			b.last_word.full_text += word_fulltext
-			if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
-				b.last_word.strongs = strongs
+		if strings.HasPrefix(word_fulltext, "’") || strings.HasPrefix(word_fulltext, "'") {
+			if isContractionSuffix(word_fulltext[1:]) {
+				b.last_word.full_text += word_fulltext
+				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
+					b.last_word.strongs = strongs
+				}
+				return nil
 			}
-			return nil
 		}
 	}
 
