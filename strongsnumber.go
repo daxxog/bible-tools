@@ -38,4 +38,3 @@ func parseStrongs(raw string) IStrongsNumber {
 	}
 	return &strongsNumber{strongs_type: t, value: uint16(v)}
 }
-

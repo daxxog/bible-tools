@@ -30,7 +30,7 @@ func RunUSFX(in io.Reader, usfx IUSFX, out io.Writer) error {
 			fmt.Fprintln(out, book.ID())
 			i := 0
 			// dnw := DevNullWriter()
-			xml_debug := false
+			xml_debug := true
 			for word := range book.Words() {
 				i++
 				if xml_debug {

@@ -5,7 +5,6 @@ import (
 	"os"
 )
 
-
 const WEB_USFX_PATH = "./opt/usfx/eng-web/eng-web_usfx.xml"
 
 func WEBUSFX() (IUSFX, error) {

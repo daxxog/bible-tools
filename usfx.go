@@ -39,7 +39,6 @@ func (self *USFX) USFXRootElement() (*etree.Element, error) {
 	return nil, fmt.Errorf("no elements in document!")
 }
 
-
 func (self *USFX) String() string {
 	return "TODO: this is a placeholder string for IUSFX.String"
 }
