@@ -4,7 +4,25 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"regexp"
 )
+
+type IBookIndex interface {
+	Book(book_id string) (IBook, error)                          // lookup book by book_id
+	FirstStrongs(strongs_number IStrongsNumber) IWord            // nil if not found
+	LookupStrongs(strongs_number IStrongsNumber) iter.Seq[IWord] // lookup words by Strong's number:q
+	LastStrongs(strongs_number IStrongsNumber) IWord             // nil if not found
+	SearchEnglish(regexp *regexp.Regexp) iter.Seq[IWord]         // lookup words (matching on IWord.Text) using regular expression
+	Books() iter.Seq[IBook]                                      // sequence of books contained in this index
+	Chapters() iter.Seq[IChapter]                                // sequence of chapters contained in this index
+	Verses() iter.Seq[IVerse]                                    // sequence of verses contained in this index
+	Words() iter.Seq[IWord]                                      // sequence of words contained in this index
+}
+
+type IBookIndexBuilder interface {
+	AddBook(IBook) error        // error if .AddBook called after .Build
+	Build() (IBookIndex, error) // error if called twice
+}
 
 type IXMLBookBytes interface {
 	BookBytes(book_id string) *[]byte            // return a reference to the existing byte array or initialize a new one (Singleton pattern)
