@@ -8,6 +8,7 @@ import (
 
 type IXMLBookBytes interface {
 	BookBytes(book_id string) *[]byte            // return a reference to the existing byte array or initialize a new one (Singleton pattern)
+	BookBytesLen(book_id string) uint            // current length of underlying byte array
 	BookByteWriter(book_id string) io.ByteWriter // return a writer which can safely append to the underlying byte array (creating one if needed) for a specific book_id
 }
 

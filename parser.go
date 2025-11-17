@@ -54,10 +54,6 @@ type ETreeBookParserState struct {
 	pending_text       strings.Builder // for text outside w
 	pending_start      uint            // start pos for pending_text or w tag
 	tag_start_pos      uint            // start pos of current tag (<)
-
-	// XML tracking
-	xml_source     *[]byte       // pointer to current book's XML byte slice
-	current_writer io.ByteWriter // writer that appends to xml_source
 }
 
 type ETreeBookParser struct {
@@ -88,9 +84,7 @@ func NewEtreeParserWithDebug(debug_writer io.Writer) *ETreeBookParser {
 func (self *ETreeBookParser) SetBook(book string) {
 	self.state.book = book
 	self.state.builder = NewBookBuilder(book)
-	self.state.xml_source = self.book_bytes.BookBytes(book)
-	self.state.current_writer = self.book_bytes.BookByteWriter(book)
-	self.state.pending_start = uint(len(*self.state.xml_source))
+	self.state.pending_start = self.book_bytes.BookBytesLen(book)
 	self.state.tag_start_pos = 0
 
 	// Reset parser state
@@ -119,10 +113,10 @@ func (self *ETreeBookParser) WriteSettings() etree.WriteSettings {
 }
 
 func (self *ETreeBookParser) WriteByte(c byte) error {
-	if err := self.state.current_writer.WriteByte(c); err != nil {
+	if err := self.book_bytes.BookByteWriter(self.state.book).WriteByte(c); err != nil {
 		return err
 	}
-	pos := uint(len(*self.state.xml_source)) - 1
+	pos := self.book_bytes.BookBytesLen(self.state.book) - 1
 	_, err := fmt.Fprintf(self.debug_writer, "WriteByte(%b, %q) pos=%d\n", c, c, pos)
 	if err != nil {
 		return err
@@ -161,7 +155,7 @@ func (self *ETreeBookParser) Flush() (IBook, error) {
 		return nil, errors.New("nil book builder (was .Flush called twice or without SetBook?)")
 	}
 	if self.state.vopen && !self.state.wopen && self.state.note_depth == 0 {
-		end_pos := uint(len(*self.state.xml_source))
+		end_pos := self.book_bytes.BookBytesLen(self.state.book)
 		if err := self.flushPendingText(end_pos); err != nil {
 			return nil, err
 		}
@@ -333,7 +327,7 @@ func (self *ETreeBookParser) handleCloseTag(tag string, pos uint) error {
 					start -= context
 				}
 				chunk_size := uint8(pos - start + 1 + context)
-				chunk := newXMLChunk(*self.state.xml_source, start, chunk_size)
+				chunk := newXMLChunk(self.book_bytes.BookBytes(self.state.book), start, chunk_size)
 				add_err := self.state.builder.AddWord(self.state.vref, self.state.sref, fulltext, chunk)
 				if add_err != nil {
 					return add_err
@@ -345,30 +339,6 @@ func (self *ETreeBookParser) handleCloseTag(tag string, pos uint) error {
 	case "f", "x":
 		self.state.note_depth--
 	}
-	return nil
-}
-
-func (self *ETreeBookParser) flushPendingText(end_pos uint) error {
-	if !self.state.vopen || self.state.wopen || self.state.note_depth != 0 {
-		return nil
-	}
-	fields := strings.Fields(self.state.pending_text.String())
-	merged := mergeContractions(fields)
-	const context uint = 20
-	start := self.state.pending_start
-	if start > context {
-		start -= context
-	}
-	chunk_size := uint8(end_pos - start + context)
-	chunk := newXMLChunk(*self.state.xml_source, start, chunk_size)
-	for _, f := range merged {
-		add_err := self.state.builder.AddWord(self.state.vref, "", f, chunk)
-		if add_err != nil {
-			return add_err
-		}
-	}
-	self.state.pending_text.Reset()
-	self.state.pending_start = end_pos
 	return nil
 }
 
@@ -395,24 +365,108 @@ func isContractionSuffix(suffix string) bool {
 	return false
 }
 
-func mergeContractions(fields []string) []string {
-	var merged []string
-	for i := 0; i < len(fields); i++ {
-		f := fields[i]
+// Add this struct near flushPendingText
+type wordInfo struct {
+	text  string
+	start uint
+	end   uint
+}
+
+func (self *ETreeBookParser) flushPendingText(end_pos uint) error {
+	if !self.state.vopen || self.state.wopen || self.state.note_depth != 0 {
+		return nil
+	}
+	s := self.state.pending_text.String()
+	if s == "" {
+		return nil
+	}
+	var wordInfos []wordInfo
+	offset := uint(0)
+	for offset < uint(len(s)) {
+		r, size := utf8.DecodeRuneInString(s[int(offset):])
+		if unicode.IsSpace(r) {
+			offset += uint(size)
+			continue
+		}
+		wstart := self.state.pending_start + offset
+		var builder strings.Builder
+		for offset < uint(len(s)) {
+			r, size := utf8.DecodeRuneInString(s[int(offset):])
+			if unicode.IsSpace(r) {
+				break
+			}
+			builder.WriteRune(r)
+			offset += uint(size)
+		}
+		wend := self.state.pending_start + offset
+		wordInfos = append(wordInfos, wordInfo{
+			text:  builder.String(),
+			start: wstart,
+			end:   wend,
+		})
+	}
+	merged := mergeContractionsWithPos(wordInfos)
+	for _, wi := range merged {
+		context := uint(60)
+		cstart := wi.start
+		if cstart > context {
+			cstart -= context
+		}
+		cend := wi.end + context
+		if cend > self.book_bytes.BookBytesLen(self.state.book) {
+			cend = self.book_bytes.BookBytesLen(self.state.book)
+		}
+		csize := cend - cstart
+		if csize > 255 {
+			wordLen := wi.end - wi.start
+			extra := uint(255) - wordLen
+			before := extra / 2
+			after := extra - before
+			cstart = wi.start
+			if cstart > before {
+				cstart -= before
+			} else {
+				cstart = 0
+			}
+			cend = wi.end + after
+			if cend > self.book_bytes.BookBytesLen(self.state.book) {
+				cend = self.book_bytes.BookBytesLen(self.state.book)
+				cstart = cend - 255
+			}
+			csize = cend - cstart
+		}
+		chunk := newXMLChunk(self.book_bytes.BookBytes(self.state.book), cstart, uint8(csize))
+		add_err := self.state.builder.AddWord(self.state.vref, "", wi.text, chunk)
+		if add_err != nil {
+			return add_err
+		}
+	}
+	self.state.pending_text.Reset()
+	self.state.pending_start = end_pos
+	return nil
+}
+
+// Updated helper: contraction merging with positions
+func mergeContractionsWithPos(infos []wordInfo) []wordInfo {
+	var merged []wordInfo
+	for i := 0; i < len(infos); i++ {
+		f := infos[i]
 		if len(merged) > 0 {
 			prevIdx := len(merged) - 1
 			prev := merged[prevIdx]
-			if strings.HasSuffix(prev, "’") || strings.HasSuffix(prev, "'") {
-				if isContractionSuffix(f) {
-					merged[prevIdx] = prev + f
+			if strings.HasSuffix(prev.text, "’") || strings.HasSuffix(prev.text, "'") {
+				if isContractionSuffix(f.text) {
+					merged[prevIdx].text += f.text
+					merged[prevIdx].end = f.end
 					continue
 				}
 			}
-			r, size := utf8.DecodeRuneInString(f)
+			r, _ := utf8.DecodeRuneInString(f.text)
 			if r == '’' || r == '\'' {
-				suffix := f[size:]
+				suffix := f.text[utf8.RuneLen(r):]
 				if isContractionSuffix(suffix) {
-					merged[prevIdx] = prev + f
+					merged[prevIdx].text += f.text
+					merged[prevIdx].end = f.end
 					continue
 				}
 			}
@@ -444,6 +498,7 @@ func (b *bookBuilder) ID() string {
 	return b.book.id
 }
 
+// Updated AddWord to merge chunks when appending text
 func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, chunk IXMLChunk) error {
 	parts := strings.Split(vref, ".")
 	if len(parts) != 3 {
@@ -501,6 +556,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, ch
 		if len(last) > 0 && unicode.IsLetter(rune(last[len(last)-1])) {
 			if word_fulltext == "’s" || word_fulltext == "'s" {
 				b.last_word.full_text += word_fulltext
+				b.last_word.xml_chunk = MergeChunks(b.last_word.xml_chunk, chunk)
 				return nil
 			}
 			if strings.HasSuffix(last, "n") && (word_fulltext == "’t" || word_fulltext == "'t") {
@@ -508,6 +564,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, ch
 				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
 					b.last_word.strongs = strongs
 				}
+				b.last_word.xml_chunk = MergeChunks(b.last_word.xml_chunk, chunk)
 				return nil
 			}
 		}
@@ -518,6 +575,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, ch
 				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
 					b.last_word.strongs = strongs
 				}
+				b.last_word.xml_chunk = MergeChunks(b.last_word.xml_chunk, chunk)
 				return nil
 			}
 		}
@@ -527,6 +585,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, ch
 				if strongs.Type() != "" && b.last_word.strongs.Type() == "" {
 					b.last_word.strongs = strongs
 				}
+				b.last_word.xml_chunk = MergeChunks(b.last_word.xml_chunk, chunk)
 				return nil
 			}
 		}
@@ -538,6 +597,7 @@ func (b *bookBuilder) AddWord(vref string, sref string, word_fulltext string, ch
 	if isAllPunct(word_fulltext) {
 		if b.last_word != nil {
 			b.last_word.full_text += word_fulltext
+			b.last_word.xml_chunk = MergeChunks(b.last_word.xml_chunk, chunk)
 		}
 		return nil
 	}
